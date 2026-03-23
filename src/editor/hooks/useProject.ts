@@ -4,6 +4,8 @@ import { createProject, generateId, updateBOM, serializeProject, deserializeProj
 import { exportProjectForEasyEDA } from '../../core/easyeda-export';
 import { runDRC } from '../../core/design-rules';
 
+const MAX_UNDO_HISTORY = 50;
+
 export function useProject() {
   const [project, setProject] = useState<Project>(() => createProject('Untitled', ''));
   const [editorState, setEditorState] = useState<EditorState>({
@@ -20,14 +22,43 @@ export function useProject() {
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const undoStack = useRef<string[]>([]);
+  const redoStack = useRef<string[]>([]);
+
+  const pushUndo = useCallback((p: Project) => {
+    undoStack.current.push(serializeProject(p));
+    if (undoStack.current.length > MAX_UNDO_HISTORY) {
+      undoStack.current.shift();
+    }
+    redoStack.current = []; // Clear redo on new action
+  }, []);
+
+  const undo = useCallback(() => {
+    if (undoStack.current.length === 0) return;
+    setProject(prev => {
+      redoStack.current.push(serializeProject(prev));
+      const prevState = undoStack.current.pop()!;
+      return deserializeProject(prevState);
+    });
+  }, []);
+
+  const redo = useCallback(() => {
+    if (redoStack.current.length === 0) return;
+    setProject(prev => {
+      undoStack.current.push(serializeProject(prev));
+      const nextState = redoStack.current.pop()!;
+      return deserializeProject(nextState);
+    });
+  }, []);
 
   const updateProject = useCallback((updater: (p: Project) => Project) => {
     setProject(prev => {
+      pushUndo(prev);
       const updated = updater(prev);
       updated.modified = new Date().toISOString();
       return updated;
     });
-  }, []);
+  }, [pushUndo]);
 
   // --- Schematic operations ---
 
@@ -234,5 +265,7 @@ export function useProject() {
     importProjectFile,
     drcResults,
     fileInputRef,
+    undo,
+    redo,
   };
 }

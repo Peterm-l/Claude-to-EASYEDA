@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { SchematicCanvas } from './components/SchematicCanvas';
 import { PCBCanvas } from './components/PCBCanvas';
 import { PartsPanel } from './components/PartsPanel';
@@ -16,6 +16,7 @@ export function App() {
     addPCBComponent, addTrack, addVia,
     moveComponent, deleteSelected,
     exportToEasyEDA, exportProjectFile, importProjectFile,
+    undo, redo,
   } = useProject();
 
   const [drcViolations, setDrcViolations] = useState<DRCViolation[]>([]);
@@ -86,6 +87,31 @@ export function App() {
   const handleAddTrack = useCallback((points: Point[], netId: string) => {
     addTrack(points, netId, editorState.activeLayer);
   }, [addTrack, editorState.activeLayer]);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+Z / Cmd+Z = Undo
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      }
+      // Ctrl+Shift+Z / Ctrl+Y = Redo
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        redo();
+      }
+      // Delete/Backspace = Delete selected
+      if ((e.key === 'Delete' || e.key === 'Backspace') && editorState.selectedIds.length > 0) {
+        // Avoid deleting when typing in inputs
+        if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
+        e.preventDefault();
+        deleteSelected();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [undo, redo, deleteSelected, editorState.selectedIds]);
 
   const handleApiKeyChange = useCallback((key: string) => {
     setApiKey(key);

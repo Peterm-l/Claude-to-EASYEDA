@@ -47,12 +47,22 @@ When using the MCP server, these tools are available:
 - `add_power_flag` - Add VCC/GND symbols
 - `move_component` - Reposition components
 - `rotate_component` - Rotate components
+- `delete_wire` - Remove a wire by ID
+- `delete_net` - Remove a net and all associated wires/labels
+- `delete_net_label` - Remove a net label by ID
+- `delete_power_flag` - Remove a power/ground flag by ID
+- `list_wires` - List all wires with their IDs and net connections
 
 ### PCB
 - `set_board_size` - Set PCB dimensions
 - `add_track` - Route traces
 - `add_via` - Place vias
 - `add_copper_zone` - Add copper pours (ground planes)
+- `delete_track` - Remove a track by ID
+- `delete_via` - Remove a via by ID
+- `delete_copper_zone` - Remove a copper zone by ID
+- `list_tracks` - List all tracks with their IDs, nets, and layers
+- `list_vias` - List all vias with their IDs and positions
 
 ### Project
 - `create_project` / `save_project` / `load_project`

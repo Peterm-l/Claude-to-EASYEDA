@@ -11,6 +11,18 @@ interface Props {
   onSelectIds: (ids: string[]) => void;
 }
 
+function distToSegmentMM(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.sqrt((p.x - a.x) ** 2 + (p.y - a.y) ** 2);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const projX = a.x + t * dx;
+  const projY = a.y + t * dy;
+  return Math.sqrt((p.x - projX) ** 2 + (p.y - projY) ** 2);
+}
+
 const GRID_MM = 0.5; // 0.5mm grid
 const MM_PX = 40;    // pixels per mm at zoom=1
 
@@ -32,6 +44,8 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dragging, setDragging] = useState<{ id: string; offset: Point } | null>(null);
   const [trackPoints, setTrackPoints] = useState<Point[]>([]);
+  const [measureStart, setMeasureStart] = useState<Point | null>(null);
+  const [measureEnd, setMeasureEnd] = useState<Point | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState<Point>({ x: 0, y: 0 });
 
@@ -54,6 +68,76 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
       y: Math.round(p.y / GRID_MM) * GRID_MM,
     };
   }, [editorState.snapToGrid]);
+
+  // Get all pad positions in world coordinates for snapping
+  const getPadPositions = useCallback((): { x: number; y: number; compId: string; padNum: string }[] => {
+    const pads: { x: number; y: number; compId: string; padNum: string }[] = [];
+    for (const comp of project.pcb.components) {
+      const rad = (comp.rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      for (const pad of comp.footprint.pads) {
+        const rx = pad.centerX * cos - pad.centerY * sin;
+        const ry = pad.centerX * sin + pad.centerY * cos;
+        pads.push({
+          x: comp.position.x + rx,
+          y: comp.position.y + ry,
+          compId: comp.id,
+          padNum: pad.number,
+        });
+      }
+    }
+    return pads;
+  }, [project.pcb.components]);
+
+  // Snap to nearest pad if within threshold, also snap to via centers and track endpoints
+  const snapToNearest = useCallback((p: Point): Point => {
+    const PAD_SNAP_RADIUS = 1.0; // mm
+    const padPositions = getPadPositions();
+    let bestDist = PAD_SNAP_RADIUS;
+    let bestPos: Point | null = null;
+
+    for (const pad of padPositions) {
+      const dx = p.x - pad.x;
+      const dy = p.y - pad.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPos = { x: pad.x, y: pad.y };
+      }
+    }
+
+    // Snap to via centers
+    for (const via of project.pcb.vias) {
+      const dx = p.x - via.position.x;
+      const dy = p.y - via.position.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPos = { x: via.position.x, y: via.position.y };
+      }
+    }
+
+    // Snap to track endpoints
+    for (const track of project.pcb.tracks) {
+      if (track.points.length > 0) {
+        const first = track.points[0];
+        const last = track.points[track.points.length - 1];
+        for (const ep of [first, last]) {
+          const dx = p.x - ep.x;
+          const dy = p.y - ep.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestPos = { x: ep.x, y: ep.y };
+          }
+        }
+      }
+    }
+
+    if (bestPos) return bestPos;
+    return snapToGrid(p);
+  }, [getPadPositions, snapToGrid, project.pcb.vias, project.pcb.tracks]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -232,6 +316,18 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
       drawPCBComponent(ctx, comp, editorState.selectedIds.includes(comp.id), scale);
     }
 
+    // Draw pad snap targets when track tool is active
+    if (editorState.activeTool === 'track' || editorState.activeTool === 'via') {
+      const padPositions = getPadPositions();
+      for (const pad of padPositions) {
+        ctx.strokeStyle = '#00ff88';
+        ctx.lineWidth = 0.08;
+        ctx.beginPath();
+        ctx.arc(pad.x, pad.y, 0.3, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
     // Track being drawn
     if (trackPoints.length > 0) {
       ctx.strokeStyle = LAYER_COLORS[editorState.activeLayer] ?? '#ff3333';
@@ -245,6 +341,40 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
       }
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+
+    // Measure line
+    if (measureStart && measureEnd) {
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 0.08;
+      ctx.setLineDash([0.3, 0.15]);
+      ctx.beginPath();
+      ctx.moveTo(measureStart.x, measureStart.y);
+      ctx.lineTo(measureEnd.x, measureEnd.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const dx = measureEnd.x - measureStart.x;
+      const dy = measureEnd.y - measureStart.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const midX = (measureStart.x + measureEnd.x) / 2;
+      const midY = (measureStart.y + measureEnd.y) / 2;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `${1}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(`${dist.toFixed(2)}mm`, midX, midY - 0.5);
+      ctx.font = `${0.7}px monospace`;
+      ctx.fillText(`dx: ${Math.abs(dx).toFixed(2)} dy: ${Math.abs(dy).toFixed(2)}`, midX, midY + 0.8);
+
+      // Endpoints
+      ctx.fillStyle = '#ff4466';
+      ctx.beginPath();
+      ctx.arc(measureStart.x, measureStart.y, 0.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(measureEnd.x, measureEnd.y, 0.2, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     ctx.restore();
@@ -379,13 +509,61 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
     }
 
     if (editorState.activeTool === 'track') {
-      setTrackPoints(prev => [...prev, snapped]);
+      const padSnapped = snapToNearest(world);
+      setTrackPoints(prev => [...prev, padSnapped]);
     }
 
     if (editorState.activeTool === 'via') {
-      onAddVia(snapped, '');
+      const padSnapped = snapToNearest(world);
+      onAddVia(padSnapped, '');
     }
-  }, [editorState, project, toWorld, snapToGrid, onSelectIds, onAddVia]);
+
+    if (editorState.activeTool === 'measure') {
+      if (!measureStart) {
+        setMeasureStart(snapped);
+        setMeasureEnd(null);
+      } else {
+        setMeasureEnd(snapped);
+        setMeasureStart(null); // Reset for next measurement
+      }
+      return;
+    }
+
+    if (editorState.activeTool === 'delete') {
+      // Hit test tracks
+      for (const track of project.pcb.tracks) {
+        for (let i = 0; i < track.points.length - 1; i++) {
+          const p1 = track.points[i];
+          const p2 = track.points[i + 1];
+          const dist = distToSegmentMM(world, p1, p2);
+          if (dist < 0.5) {
+            onSelectIds([track.id]);
+            return;
+          }
+        }
+      }
+      // Hit test vias
+      for (const via of project.pcb.vias) {
+        const dx = world.x - via.position.x;
+        const dy = world.y - via.position.y;
+        if (Math.sqrt(dx * dx + dy * dy) < via.diameter) {
+          onSelectIds([via.id]);
+          return;
+        }
+      }
+      // Hit test components
+      for (const comp of [...project.pcb.components].reverse()) {
+        const cy = comp.footprint.courtyard;
+        if (world.x >= comp.position.x + cy.x &&
+            world.x <= comp.position.x + cy.x + cy.width &&
+            world.y >= comp.position.y + cy.y &&
+            world.y <= comp.position.y + cy.y + cy.height) {
+          onSelectIds([comp.id]);
+          return;
+        }
+      }
+    }
+  }, [editorState, project, toWorld, snapToGrid, snapToNearest, onSelectIds, onAddVia]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const canvas = canvasRef.current;
@@ -437,6 +615,18 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
     onEditorStateChange({ ...editorState, zoom: newZoom });
   }, [editorState, onEditorStateChange]);
 
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      setTrackPoints([]);
+      setMeasureStart(null);
+      setMeasureEnd(null);
+      onSelectIds([]);
+    }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      // Handled by parent via deleteSelected
+    }
+  }, [onSelectIds]);
+
   return (
     <canvas
       ref={canvasRef}
@@ -446,6 +636,7 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
       onMouseUp={handleMouseUp}
       onDoubleClick={handleDoubleClick}
       onWheel={handleWheel}
+      onKeyDown={handleKeyDown}
       tabIndex={0}
     />
   );

@@ -655,6 +655,98 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       return { deleted: schIdx >= 0 };
     }
 
+    case 'delete_wire': {
+      const id = String(args.id);
+      const idx = currentProject.schematic.wires.findIndex(w => w.id === id);
+      if (idx >= 0) currentProject.schematic.wires.splice(idx, 1);
+      autoSave();
+      return { deleted: idx >= 0 };
+    }
+
+    case 'delete_net': {
+      const id = String(args.id ?? args.name ?? '');
+      const idx = currentProject.schematic.nets.findIndex(n => n.id === id || n.name === id);
+      if (idx >= 0) {
+        const netId = currentProject.schematic.nets[idx].id;
+        currentProject.schematic.nets.splice(idx, 1);
+        // Remove associated wires, labels, and power flags
+        currentProject.schematic.wires = currentProject.schematic.wires.filter(w => w.netId !== netId);
+        currentProject.schematic.netLabels = currentProject.schematic.netLabels.filter(l => l.netId !== netId);
+        currentProject.schematic.powerFlags = currentProject.schematic.powerFlags.filter(f => f.netId !== netId);
+      }
+      autoSave();
+      return { deleted: idx >= 0 };
+    }
+
+    case 'delete_net_label': {
+      const id = String(args.id);
+      const idx = currentProject.schematic.netLabels.findIndex(l => l.id === id);
+      if (idx >= 0) currentProject.schematic.netLabels.splice(idx, 1);
+      autoSave();
+      return { deleted: idx >= 0 };
+    }
+
+    case 'delete_power_flag': {
+      const id = String(args.id);
+      const idx = currentProject.schematic.powerFlags.findIndex(f => f.id === id);
+      if (idx >= 0) currentProject.schematic.powerFlags.splice(idx, 1);
+      autoSave();
+      return { deleted: idx >= 0 };
+    }
+
+    case 'delete_track': {
+      const id = String(args.id);
+      const idx = currentProject.pcb.tracks.findIndex(t => t.id === id);
+      if (idx >= 0) currentProject.pcb.tracks.splice(idx, 1);
+      autoSave();
+      return { deleted: idx >= 0 };
+    }
+
+    case 'delete_via': {
+      const id = String(args.id);
+      const idx = currentProject.pcb.vias.findIndex(v => v.id === id);
+      if (idx >= 0) currentProject.pcb.vias.splice(idx, 1);
+      autoSave();
+      return { deleted: idx >= 0 };
+    }
+
+    case 'delete_copper_zone': {
+      const id = String(args.id);
+      const idx = currentProject.pcb.copperZones.findIndex(z => z.id === id);
+      if (idx >= 0) currentProject.pcb.copperZones.splice(idx, 1);
+      autoSave();
+      return { deleted: idx >= 0 };
+    }
+
+    case 'list_wires': {
+      return currentProject.schematic.wires.map(w => ({
+        id: w.id,
+        netId: w.netId,
+        netName: currentProject.schematic.nets.find(n => n.id === w.netId)?.name,
+        pointCount: w.points.length,
+      }));
+    }
+
+    case 'list_tracks': {
+      return currentProject.pcb.tracks.map(t => ({
+        id: t.id,
+        netId: t.netId,
+        netName: currentProject.schematic.nets.find(n => n.id === t.netId)?.name,
+        layer: t.layer,
+        width: t.width,
+        pointCount: t.points.length,
+      }));
+    }
+
+    case 'list_vias': {
+      return currentProject.pcb.vias.map(v => ({
+        id: v.id,
+        netId: v.netId,
+        position: v.position,
+        diameter: v.diameter,
+      }));
+    }
+
     case 'set_design_rules': {
       if (args.min_trace_width !== undefined)
         currentProject.designRules.minTraceWidth = Number(args.min_trace_width);
@@ -961,6 +1053,98 @@ const TOOLS_MANIFEST = [
       },
       required: ['id'],
     },
+  },
+  {
+    name: 'delete_wire',
+    description: 'Delete a wire from the schematic by its ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Wire ID' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_net',
+    description: 'Delete a net and all associated wires, labels, and power flags.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Net ID or net name' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_net_label',
+    description: 'Delete a net label from the schematic.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Net label ID' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_power_flag',
+    description: 'Delete a power/ground flag from the schematic.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Power flag ID' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_track',
+    description: 'Delete a PCB track/trace by its ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Track ID' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_via',
+    description: 'Delete a via from the PCB by its ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Via ID' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_copper_zone',
+    description: 'Delete a copper zone/pour from the PCB by its ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Copper zone ID' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'list_wires',
+    description: 'List all wires in the schematic with their IDs and net connections.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_tracks',
+    description: 'List all tracks in the PCB with their IDs, nets, layers, and widths.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_vias',
+    description: 'List all vias in the PCB with their IDs and positions.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'set_design_rules',

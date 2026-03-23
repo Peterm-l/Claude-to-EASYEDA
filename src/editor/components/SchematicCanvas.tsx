@@ -10,6 +10,19 @@ interface Props {
   onSelectIds: (ids: string[]) => void;
 }
 
+// Distance from point to line segment
+function distToSegment(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.sqrt((p.x - a.x) ** 2 + (p.y - a.y) ** 2);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const projX = a.x + t * dx;
+  const projY = a.y + t * dy;
+  return Math.sqrt((p.x - projX) ** 2 + (p.y - projY) ** 2);
+}
+
 const GRID = 50; // mils
 const COLORS = {
   background: '#1a1a2e',
@@ -50,6 +63,84 @@ export function SchematicCanvas({ project, editorState, onEditorStateChange, onM
       y: Math.round(p.y / GRID) * GRID,
     };
   }, [editorState.snapToGrid]);
+
+  // Get all pin positions in world coordinates for snapping
+  const getPinPositions = useCallback((): { x: number; y: number; compId: string; pinIdx: number }[] => {
+    const pins: { x: number; y: number; compId: string; pinIdx: number }[] = [];
+    for (const comp of project.schematic.components) {
+      const pinCount = comp.pins?.length ?? 2;
+      const halfPins = Math.ceil(pinCount / 2);
+      const bodyW = 120;
+      const bodyH = Math.max(80, halfPins * 50);
+      const leftPins = comp.pins?.slice(0, halfPins) ?? [];
+      const rightPins = comp.pins?.slice(halfPins) ?? [];
+
+      const rad = (comp.rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const rotate = (lx: number, ly: number) => ({
+        x: comp.position.x + lx * cos - ly * sin,
+        y: comp.position.y + lx * sin + ly * cos,
+      });
+
+      for (let i = 0; i < leftPins.length; i++) {
+        const py = -bodyH / 2 + 25 + i * 50;
+        const pos = rotate(-bodyW / 2 - 30, py);
+        pins.push({ ...pos, compId: comp.id, pinIdx: i });
+      }
+      for (let i = 0; i < rightPins.length; i++) {
+        const py = -bodyH / 2 + 25 + i * 50;
+        const pos = rotate(bodyW / 2 + 30, py);
+        pins.push({ ...pos, compId: comp.id, pinIdx: halfPins + i });
+      }
+    }
+    return pins;
+  }, [project.schematic.components]);
+
+  // Snap to nearest pin if within threshold, otherwise snap to grid
+  const snapToNearest = useCallback((p: Point): Point => {
+    const PIN_SNAP_RADIUS = 25; // mils
+    const pins = getPinPositions();
+    let bestDist = PIN_SNAP_RADIUS;
+    let bestPos: Point | null = null;
+
+    for (const pin of pins) {
+      const dx = p.x - pin.x;
+      const dy = p.y - pin.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPos = { x: pin.x, y: pin.y };
+      }
+    }
+
+    // Also snap to wire endpoints
+    for (const wire of project.schematic.wires) {
+      for (const wp of wire.points) {
+        const dx = p.x - wp.x;
+        const dy = p.y - wp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestPos = { x: wp.x, y: wp.y };
+        }
+      }
+    }
+
+    // Also snap to net labels
+    for (const label of project.schematic.netLabels) {
+      const dx = p.x - label.position.x;
+      const dy = p.y - label.position.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPos = { x: label.position.x, y: label.position.y };
+      }
+    }
+
+    if (bestPos) return bestPos;
+    return snapToGrid(p);
+  }, [getPinPositions, snapToGrid, project.schematic.wires, project.schematic.netLabels]);
 
   // Draw
   const draw = useCallback(() => {
@@ -163,6 +254,18 @@ export function SchematicCanvas({ project, editorState, onEditorStateChange, onM
       ctx.fill();
     }
 
+    // Draw pin snap targets when wire tool is active
+    if (editorState.activeTool === 'wire') {
+      const pinPositions = getPinPositions();
+      for (const pin of pinPositions) {
+        ctx.strokeStyle = '#00ff88';
+        ctx.lineWidth = 1 / zoom;
+        ctx.beginPath();
+        ctx.arc(pin.x, pin.y, 6 / zoom, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
     // Wire being drawn
     if (wirePoints.length > 0) {
       ctx.strokeStyle = COLORS.wire;
@@ -175,6 +278,43 @@ export function SchematicCanvas({ project, editorState, onEditorStateChange, onM
       }
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+
+    // Power flags
+    for (const flag of project.schematic.powerFlags) {
+      ctx.fillStyle = flag.type === 'ground' ? '#ff4444' : '#44ff44';
+      ctx.strokeStyle = flag.type === 'ground' ? '#ff4444' : '#44ff44';
+      ctx.lineWidth = 1.5 / zoom;
+      ctx.font = `${12 / zoom}px monospace`;
+      ctx.textAlign = 'center';
+
+      if (flag.type === 'ground') {
+        // GND symbol: vertical line + 3 horizontal lines
+        ctx.beginPath();
+        ctx.moveTo(flag.position.x, flag.position.y);
+        ctx.lineTo(flag.position.x, flag.position.y + 15);
+        ctx.stroke();
+        for (let i = 0; i < 3; i++) {
+          const w = 12 - i * 4;
+          const y = flag.position.y + 15 + i * 4;
+          ctx.beginPath();
+          ctx.moveTo(flag.position.x - w, y);
+          ctx.lineTo(flag.position.x + w, y);
+          ctx.stroke();
+        }
+      } else {
+        // VCC symbol: vertical line + arrow up
+        ctx.beginPath();
+        ctx.moveTo(flag.position.x, flag.position.y);
+        ctx.lineTo(flag.position.x, flag.position.y - 20);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(flag.position.x - 8, flag.position.y - 14);
+        ctx.lineTo(flag.position.x, flag.position.y - 22);
+        ctx.lineTo(flag.position.x + 8, flag.position.y - 14);
+        ctx.stroke();
+      }
+      ctx.fillText(flag.name, flag.position.x, flag.type === 'ground' ? flag.position.y + 35 : flag.position.y - 28);
     }
 
     ctx.restore();
@@ -337,9 +477,55 @@ export function SchematicCanvas({ project, editorState, onEditorStateChange, onM
     }
 
     if (editorState.activeTool === 'wire') {
-      setWirePoints(prev => [...prev, snapped]);
+      const pinSnapped = snapToNearest(world);
+      setWirePoints(prev => [...prev, pinSnapped]);
     }
-  }, [editorState, project, toWorld, snapToGrid, onSelectIds]);
+
+    if (editorState.activeTool === 'delete') {
+      // Hit test for deletion - wires, components, labels, etc.
+      for (const wire of project.schematic.wires) {
+        for (let i = 0; i < wire.points.length - 1; i++) {
+          const p1 = wire.points[i];
+          const p2 = wire.points[i + 1];
+          const dist = distToSegment(world, p1, p2);
+          if (dist < 15) {
+            onSelectIds([wire.id]);
+            return;
+          }
+        }
+      }
+      for (const label of project.schematic.netLabels) {
+        const dx = world.x - label.position.x;
+        const dy = world.y - label.position.y;
+        if (Math.sqrt(dx * dx + dy * dy) < 20) {
+          onSelectIds([label.id]);
+          return;
+        }
+      }
+      for (const flag of project.schematic.powerFlags) {
+        const dx = world.x - flag.position.x;
+        const dy = world.y - flag.position.y;
+        if (Math.sqrt(dx * dx + dy * dy) < 20) {
+          onSelectIds([flag.id]);
+          return;
+        }
+      }
+      // Components
+      for (const comp of [...project.schematic.components].reverse()) {
+        const pinCount = comp.pins?.length ?? 2;
+        const halfPins = Math.ceil(pinCount / 2);
+        const bodyW = 120;
+        const bodyH = Math.max(80, halfPins * 50);
+        if (world.x >= comp.position.x - bodyW / 2 - 30 &&
+            world.x <= comp.position.x + bodyW / 2 + 30 &&
+            world.y >= comp.position.y - bodyH / 2 &&
+            world.y <= comp.position.y + bodyH / 2) {
+          onSelectIds([comp.id]);
+          return;
+        }
+      }
+    }
+  }, [editorState, project, toWorld, snapToGrid, snapToNearest, onSelectIds]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const canvas = canvasRef.current;
