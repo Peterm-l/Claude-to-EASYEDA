@@ -208,10 +208,22 @@ export interface CopperZone {
   priority: number;
 }
 
+export interface MountingHole {
+  id: string;
+  position: Point;          // mm
+  diameter: number;         // mm (drill)
+  padDiameter: number;      // mm (copper ring, 0 for NPTH)
+  plated: boolean;
+}
+
 export interface BoardOutline {
-  points: Point[];          // mm, closed polygon
-  width: number;
-  height: number;
+  shape: 'rectangle' | 'rounded_rect' | 'circle' | 'polygon';
+  points: Point[];          // mm, closed polygon vertices
+  width: number;            // mm, bounding box
+  height: number;           // mm, bounding box
+  cornerRadius: number;     // mm, for rounded_rect (0 = sharp corners)
+  mountingHoles: MountingHole[];
+  keepOutZones: Point[][];  // Areas where no copper/components allowed
 }
 
 export interface PCBLayout {

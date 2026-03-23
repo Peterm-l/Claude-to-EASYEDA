@@ -21,7 +21,7 @@
 //   - create_project: Create a new project
 //   - get_part_details: Get details about a specific part
 
-import { createProject, generateId, updateBOM, serializeProject, deserializeProject } from '../core/project';
+import { createProject, createBoardOutline, addCornerMountingHoles, isPointInsideBoard, isPointInKeepOut, distanceToEdge, suggestPlacementGrid, generateId, updateBOM, serializeProject, deserializeProject } from '../core/project';
 import { searchByText, searchParts, searchResistors, searchCapacitors, type SearchOptions } from '../parts/jlcpcb-api';
 import { runDRC } from '../core/design-rules';
 import { exportProjectForEasyEDA } from '../core/easyeda-export';
@@ -301,20 +301,148 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     case 'set_board_size': {
       const width = Number(args.width ?? 100);
       const height = Number(args.height ?? 100);
+      const shape = (args.shape as 'rectangle' | 'rounded_rect' | 'circle' | 'polygon') ?? 'rectangle';
+      const cornerRadius = Number(args.corner_radius ?? 0);
+      const addMountingHoles = args.mounting_holes !== false && args.mounting_holes !== undefined;
+      const holeInset = Number(args.hole_inset ?? 4);
+      const holeDiameter = Number(args.hole_diameter ?? 3.2);
 
-      currentProject.pcb.boardOutline = {
-        points: [
-          { x: 0, y: 0 },
-          { x: width, y: 0 },
-          { x: width, y: height },
-          { x: 0, y: height },
-        ],
+      let outline = createBoardOutline(shape, width, height, { cornerRadius });
+
+      if (addMountingHoles) {
+        outline = addCornerMountingHoles(outline, holeDiameter, holeDiameter + 2.8, holeInset, false);
+      }
+
+      currentProject.pcb.boardOutline = outline;
+
+      // Warn if components are outside new outline
+      const outsideComps = currentProject.pcb.components.filter(
+        c => !isPointInsideBoard(c.position, outline)
+      );
+
+      autoSave();
+      return {
         width,
         height,
+        shape,
+        cornerRadius,
+        mountingHoles: outline.mountingHoles.length,
+        componentsOutside: outsideComps.map(c => c.reference),
+      };
+    }
+
+    case 'set_board_outline': {
+      // Custom polygon outline
+      const points = (args.points as { x: number; y: number }[]) ?? [];
+      if (points.length < 3) return { error: 'Board outline needs at least 3 points' };
+
+      const minX = Math.min(...points.map(p => p.x));
+      const maxX = Math.max(...points.map(p => p.x));
+      const minY = Math.min(...points.map(p => p.y));
+      const maxY = Math.max(...points.map(p => p.y));
+
+      currentProject.pcb.boardOutline = {
+        shape: 'polygon',
+        points,
+        width: maxX - minX,
+        height: maxY - minY,
+        cornerRadius: 0,
+        mountingHoles: currentProject.pcb.boardOutline.mountingHoles,
+        keepOutZones: currentProject.pcb.boardOutline.keepOutZones,
       };
 
       autoSave();
-      return { width, height };
+      return { width: maxX - minX, height: maxY - minY, pointCount: points.length };
+    }
+
+    case 'add_mounting_hole': {
+      const x = Number(args.x);
+      const y = Number(args.y);
+      const diameter = Number(args.diameter ?? 3.2);
+      const padDiameter = Number(args.pad_diameter ?? diameter + 2.8);
+      const plated = args.plated === true;
+
+      const hole = {
+        id: generateId('mh'),
+        position: { x, y },
+        diameter,
+        padDiameter,
+        plated,
+      };
+      currentProject.pcb.boardOutline.mountingHoles.push(hole);
+
+      autoSave();
+      return { id: hole.id, x, y, diameter, padDiameter };
+    }
+
+    case 'add_keepout_zone': {
+      const points = (args.points as { x: number; y: number }[]) ?? [];
+      if (points.length < 3) return { error: 'Keep-out zone needs at least 3 points' };
+
+      currentProject.pcb.boardOutline.keepOutZones.push(points);
+
+      // Check if any existing components are in the keep-out
+      const conflicting = currentProject.pcb.components.filter(
+        c => isPointInKeepOut(c.position, currentProject.pcb.boardOutline)
+      );
+
+      autoSave();
+      return {
+        zoneIndex: currentProject.pcb.boardOutline.keepOutZones.length - 1,
+        conflictingComponents: conflicting.map(c => c.reference),
+      };
+    }
+
+    case 'suggest_placement': {
+      const margin = Number(args.margin ?? 3);
+      const spacingX = Number(args.spacing_x ?? 10);
+      const spacingY = Number(args.spacing_y ?? 10);
+
+      const positions = suggestPlacementGrid(
+        currentProject.pcb.boardOutline, margin, spacingX, spacingY
+      );
+
+      return {
+        availablePositions: positions.length,
+        positions: positions.slice(0, 50), // Return up to 50
+        boardSize: {
+          width: currentProject.pcb.boardOutline.width,
+          height: currentProject.pcb.boardOutline.height,
+        },
+        usableArea: `${(positions.length * spacingX * spacingY).toFixed(1)} mm²`,
+      };
+    }
+
+    case 'get_board_info': {
+      const outline = currentProject.pcb.boardOutline;
+      const components = currentProject.pcb.components;
+
+      const outsideBoard = components.filter(c => !isPointInsideBoard(c.position, outline));
+      const tooCloseToEdge = components.filter(c => {
+        const d = distanceToEdge(c.position, outline);
+        return d < currentProject.designRules.copperToEdge + 1; // 1mm margin warning
+      });
+
+      return {
+        shape: outline.shape,
+        width: outline.width,
+        height: outline.height,
+        cornerRadius: outline.cornerRadius,
+        area: `${(outline.width * outline.height).toFixed(1)} mm²`,
+        mountingHoles: outline.mountingHoles.map(h => ({
+          id: h.id,
+          position: h.position,
+          diameter: h.diameter,
+          plated: h.plated,
+        })),
+        keepOutZones: outline.keepOutZones.length,
+        componentsOutside: outsideBoard.map(c => c.reference),
+        componentsTooCloseToEdge: tooCloseToEdge.map(c => ({
+          reference: c.reference,
+          distanceToEdge: distanceToEdge(c.position, outline).toFixed(2) + 'mm',
+        })),
+        totalComponents: components.length,
+      };
     }
 
     case 'add_track': {
@@ -660,15 +788,74 @@ const TOOLS_MANIFEST = [
   },
   {
     name: 'set_board_size',
-    description: 'Set the PCB board dimensions.',
+    description: 'Set the PCB board dimensions and shape. Supports rectangle, rounded rectangle, circle, or custom polygon. Can auto-add M3 mounting holes at corners. Board size determines layout — JLCPCB limits: 5x5mm min, 400x500mm max.',
     inputSchema: {
       type: 'object',
       properties: {
         width: { type: 'number', description: 'Board width in mm' },
         height: { type: 'number', description: 'Board height in mm' },
+        shape: { type: 'string', enum: ['rectangle', 'rounded_rect', 'circle', 'polygon'], description: 'Board shape (default: rectangle)' },
+        corner_radius: { type: 'number', description: 'Corner radius in mm for rounded_rect (default: 0)' },
+        mounting_holes: { type: 'boolean', description: 'Add M3 mounting holes at corners' },
+        hole_inset: { type: 'number', description: 'Distance of mounting holes from edges in mm (default: 4)' },
+        hole_diameter: { type: 'number', description: 'Mounting hole drill diameter in mm (default: 3.2 for M3)' },
       },
       required: ['width', 'height'],
     },
+  },
+  {
+    name: 'set_board_outline',
+    description: 'Set a custom polygon board outline. Use when the board is not a standard shape (e.g., L-shaped, notched, or irregular). Points define the outline clockwise.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        points: { type: 'array', items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } }, description: 'Outline vertices in mm, clockwise, forming a closed polygon' },
+      },
+      required: ['points'],
+    },
+  },
+  {
+    name: 'add_mounting_hole',
+    description: 'Add a mounting hole to the board. Default is M3 (3.2mm drill). Mounting holes affect component placement clearance.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number', description: 'X position (mm)' },
+        y: { type: 'number', description: 'Y position (mm)' },
+        diameter: { type: 'number', description: 'Drill diameter in mm (default: 3.2 for M3)' },
+        pad_diameter: { type: 'number', description: 'Copper pad diameter in mm (default: drill + 2.8)' },
+        plated: { type: 'boolean', description: 'Whether the hole is plated (default: false)' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'add_keepout_zone',
+    description: 'Define an area on the board where no components or copper should be placed (e.g., under connectors, near antennas, around mounting holes).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        points: { type: 'array', items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } }, description: 'Zone outline points (mm)' },
+      },
+      required: ['points'],
+    },
+  },
+  {
+    name: 'suggest_placement',
+    description: 'Get suggested component placement positions that fit within the board outline, respecting margins, mounting holes, and keep-out zones.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        margin: { type: 'number', description: 'Minimum distance from board edge in mm (default: 3)' },
+        spacing_x: { type: 'number', description: 'Grid spacing X in mm (default: 10)' },
+        spacing_y: { type: 'number', description: 'Grid spacing Y in mm (default: 10)' },
+      },
+    },
+  },
+  {
+    name: 'get_board_info',
+    description: 'Get detailed board outline info including shape, mounting holes, keep-out zones, and which components are outside the board or too close to edges.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'add_track',

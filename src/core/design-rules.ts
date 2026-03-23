@@ -31,7 +31,8 @@ export const JLCPCB_DESIGN_RULES_4LAYER: DesignRules = {
 
 export interface DRCViolation {
   type: 'trace_width' | 'trace_spacing' | 'via_drill' | 'via_diameter' |
-        'annular_ring' | 'clearance' | 'copper_edge' | 'unconnected';
+        'annular_ring' | 'clearance' | 'copper_edge' | 'outside_board' |
+        'keepout' | 'mounting_hole_clearance' | 'unconnected';
   severity: 'error' | 'warning';
   message: string;
   elementIds: string[];
@@ -47,7 +48,7 @@ export function runDRC(project: Project): DRCViolation[] {
   const rules = project.designRules;
   const { tracks, vias, components, boardOutline } = project.pcb;
 
-  // Check trace widths
+  // --- Trace checks ---
   for (const track of tracks) {
     if (track.width < rules.minTraceWidth) {
       violations.push({
@@ -58,9 +59,49 @@ export function runDRC(project: Project): DRCViolation[] {
         location: track.points[0] ?? { x: 0, y: 0 },
       });
     }
+
+    // Check track points are inside board and away from edge
+    for (const pt of track.points) {
+      if (!isInsidePolygon(pt, boardOutline.points)) {
+        violations.push({
+          type: 'outside_board',
+          severity: 'error',
+          message: `Track extends outside board outline`,
+          elementIds: [track.id],
+          location: pt,
+        });
+        break; // one violation per track is enough
+      }
+      const edgeDist = minDistToPolygonEdge(pt, boardOutline.points);
+      if (edgeDist < rules.copperToEdge) {
+        violations.push({
+          type: 'copper_edge',
+          severity: 'error',
+          message: `Track is ${edgeDist.toFixed(3)}mm from board edge (min ${rules.copperToEdge}mm)`,
+          elementIds: [track.id],
+          location: pt,
+        });
+      }
+    }
+
+    // Check track points against keep-out zones
+    for (const zone of boardOutline.keepOutZones) {
+      for (const pt of track.points) {
+        if (isInsidePolygon(pt, zone)) {
+          violations.push({
+            type: 'keepout',
+            severity: 'error',
+            message: `Track enters keep-out zone`,
+            elementIds: [track.id],
+            location: pt,
+          });
+          break;
+        }
+      }
+    }
   }
 
-  // Check via sizes
+  // --- Via checks ---
   for (const via of vias) {
     if (via.drill < rules.minViaDrill) {
       violations.push({
@@ -90,32 +131,141 @@ export function runDRC(project: Project): DRCViolation[] {
         location: via.position,
       });
     }
-  }
 
-  // Check copper to board edge clearance
-  for (const comp of components) {
-    for (const pad of comp.footprint.pads) {
-      const padX = comp.position.x + pad.centerX;
-      const padY = comp.position.y + pad.centerY;
+    // Via inside board?
+    if (!isInsidePolygon(via.position, boardOutline.points)) {
+      violations.push({
+        type: 'outside_board',
+        severity: 'error',
+        message: `Via is outside board outline`,
+        elementIds: [via.id],
+        location: via.position,
+      });
+    } else {
+      const edgeDist = minDistToPolygonEdge(via.position, boardOutline.points);
+      if (edgeDist < rules.copperToEdge + via.diameter / 2) {
+        violations.push({
+          type: 'copper_edge',
+          severity: 'error',
+          message: `Via is ${(edgeDist - via.diameter / 2).toFixed(3)}mm from board edge (min ${rules.copperToEdge}mm)`,
+          elementIds: [via.id],
+          location: via.position,
+        });
+      }
+    }
 
-      for (let i = 0; i < boardOutline.points.length; i++) {
-        const p1 = boardOutline.points[i];
-        const p2 = boardOutline.points[(i + 1) % boardOutline.points.length];
-        const d = distPointToSegment(padX, padY, p1.x, p1.y, p2.x, p2.y);
-        if (d < rules.copperToEdge) {
-          violations.push({
-            type: 'copper_edge',
-            severity: 'error',
-            message: `Pad ${comp.reference}.${pad.number} is ${d.toFixed(3)}mm from board edge (min ${rules.copperToEdge}mm)`,
-            elementIds: [comp.id],
-            location: { x: padX, y: padY },
-          });
-        }
+    // Via vs mounting holes
+    for (const mh of boardOutline.mountingHoles) {
+      const d = dist(via.position.x, via.position.y, mh.position.x, mh.position.y);
+      const minDist = via.diameter / 2 + mh.padDiameter / 2 + rules.minClearance;
+      if (d < minDist) {
+        violations.push({
+          type: 'mounting_hole_clearance',
+          severity: 'error',
+          message: `Via is ${d.toFixed(3)}mm from mounting hole (min ${minDist.toFixed(3)}mm)`,
+          elementIds: [via.id],
+          location: via.position,
+        });
       }
     }
   }
 
-  // Check track-to-track spacing (simplified: checks endpoints)
+  // --- Component checks ---
+  for (const comp of components) {
+    // Check component center is inside board
+    if (!isInsidePolygon(comp.position, boardOutline.points)) {
+      violations.push({
+        type: 'outside_board',
+        severity: 'error',
+        message: `${comp.reference} is placed outside board outline`,
+        elementIds: [comp.id],
+        location: comp.position,
+      });
+    }
+
+    // Check each pad for edge clearance, board boundary, keep-out, and mounting hole clearance
+    for (const pad of comp.footprint.pads) {
+      const padX = comp.position.x + pad.centerX;
+      const padY = comp.position.y + pad.centerY;
+      const padPos = { x: padX, y: padY };
+
+      // Pad inside board?
+      if (!isInsidePolygon(padPos, boardOutline.points)) {
+        violations.push({
+          type: 'outside_board',
+          severity: 'error',
+          message: `Pad ${comp.reference}.${pad.number} is outside board outline`,
+          elementIds: [comp.id],
+          location: padPos,
+        });
+        continue;
+      }
+
+      // Pad to edge clearance
+      const edgeDist = minDistToPolygonEdge(padPos, boardOutline.points);
+      const padRadius = Math.max(pad.width, pad.height) / 2;
+      if (edgeDist - padRadius < rules.copperToEdge) {
+        violations.push({
+          type: 'copper_edge',
+          severity: 'error',
+          message: `Pad ${comp.reference}.${pad.number} is ${(edgeDist - padRadius).toFixed(3)}mm from board edge (min ${rules.copperToEdge}mm)`,
+          elementIds: [comp.id],
+          location: padPos,
+        });
+      }
+
+      // Pad in keep-out zone?
+      for (const zone of boardOutline.keepOutZones) {
+        if (isInsidePolygon(padPos, zone)) {
+          violations.push({
+            type: 'keepout',
+            severity: 'error',
+            message: `Pad ${comp.reference}.${pad.number} is in a keep-out zone`,
+            elementIds: [comp.id],
+            location: padPos,
+          });
+        }
+      }
+
+      // Pad vs mounting holes
+      for (const mh of boardOutline.mountingHoles) {
+        const d = dist(padX, padY, mh.position.x, mh.position.y);
+        const minDist = padRadius + mh.padDiameter / 2 + rules.minClearance;
+        if (d < minDist) {
+          violations.push({
+            type: 'mounting_hole_clearance',
+            severity: 'error',
+            message: `Pad ${comp.reference}.${pad.number} is ${d.toFixed(3)}mm from mounting hole (min ${minDist.toFixed(3)}mm)`,
+            elementIds: [comp.id],
+            location: padPos,
+          });
+        }
+      }
+    }
+
+    // Check component courtyard fits inside board
+    const cy = comp.footprint.courtyard;
+    const corners = [
+      { x: comp.position.x + cy.x, y: comp.position.y + cy.y },
+      { x: comp.position.x + cy.x + cy.width, y: comp.position.y + cy.y },
+      { x: comp.position.x + cy.x + cy.width, y: comp.position.y + cy.y + cy.height },
+      { x: comp.position.x + cy.x, y: comp.position.y + cy.y + cy.height },
+    ];
+    for (const corner of corners) {
+      if (!isInsidePolygon(corner, boardOutline.points)) {
+        violations.push({
+          type: 'outside_board',
+          severity: 'warning',
+          message: `${comp.reference} courtyard extends outside board outline`,
+          elementIds: [comp.id],
+          location: corner,
+        });
+        break; // one warning per component
+      }
+    }
+  }
+
+  // --- Track-to-track spacing ---
   for (let i = 0; i < tracks.length; i++) {
     for (let j = i + 1; j < tracks.length; j++) {
       if (tracks[i].netId === tracks[j].netId) continue;
@@ -139,7 +289,53 @@ export function runDRC(project: Project): DRCViolation[] {
     }
   }
 
+  // --- Board size sanity (JLCPCB limits: 5x5mm to 400x500mm) ---
+  if (boardOutline.width < 5 || boardOutline.height < 5) {
+    violations.push({
+      type: 'outside_board',
+      severity: 'warning',
+      message: `Board is very small (${boardOutline.width}x${boardOutline.height}mm). JLCPCB minimum is 5x5mm.`,
+      elementIds: [],
+      location: { x: 0, y: 0 },
+    });
+  }
+  if (boardOutline.width > 400 || boardOutline.height > 500) {
+    violations.push({
+      type: 'outside_board',
+      severity: 'error',
+      message: `Board exceeds JLCPCB maximum size (400x500mm). Current: ${boardOutline.width}x${boardOutline.height}mm.`,
+      elementIds: [],
+      location: { x: 0, y: 0 },
+    });
+  }
+
   return violations;
+}
+
+// Point-in-polygon (ray casting)
+function isInsidePolygon(point: { x: number; y: number }, polygon: { x: number; y: number }[]): boolean {
+  let inside = false;
+  const n = polygon.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    if ((yi > point.y) !== (yj > point.y) &&
+        point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Minimum distance from point to polygon edge
+function minDistToPolygonEdge(point: { x: number; y: number }, polygon: { x: number; y: number }[]): number {
+  let minD = Infinity;
+  for (let i = 0; i < polygon.length; i++) {
+    const j = (i + 1) % polygon.length;
+    const d = distPointToSegment(point.x, point.y, polygon[i].x, polygon[i].y, polygon[j].x, polygon[j].y);
+    if (d < minD) minD = d;
+  }
+  return minD;
 }
 
 function distPointToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {

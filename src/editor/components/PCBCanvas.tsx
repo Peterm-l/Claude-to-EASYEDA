@@ -117,6 +117,64 @@ export function PCBCanvas({ project, editorState, onEditorStateChange, onMoveCom
       // Board fill
       ctx.fillStyle = '#0f1a0f';
       ctx.fill();
+
+      // Board dimensions text
+      ctx.fillStyle = '#888800';
+      ctx.font = `${1.2}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(
+        `${outline.width.toFixed(1)}mm`,
+        outline.width / 2, -1.5
+      );
+      ctx.save();
+      ctx.translate(-1.5, outline.height / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(`${outline.height.toFixed(1)}mm`, 0, 0);
+      ctx.restore();
+    }
+
+    // Keep-out zones
+    for (const zone of outline.keepOutZones ?? []) {
+      if (zone.length < 3) continue;
+      ctx.fillStyle = '#ff000020';
+      ctx.strokeStyle = '#ff000060';
+      ctx.lineWidth = 0.15;
+      ctx.setLineDash([0.3, 0.2]);
+      ctx.beginPath();
+      ctx.moveTo(zone[0].x, zone[0].y);
+      for (let i = 1; i < zone.length; i++) {
+        ctx.lineTo(zone[i].x, zone[i].y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Mounting holes
+    for (const mh of outline.mountingHoles ?? []) {
+      // Pad ring
+      if (mh.padDiameter > 0) {
+        ctx.fillStyle = '#888844';
+        ctx.beginPath();
+        ctx.arc(mh.position.x, mh.position.y, mh.padDiameter / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Drill hole
+      ctx.fillStyle = '#0a0a1a';
+      ctx.beginPath();
+      ctx.arc(mh.position.x, mh.position.y, mh.diameter / 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Crosshair
+      ctx.strokeStyle = '#666633';
+      ctx.lineWidth = 0.05;
+      const r = mh.padDiameter / 2 + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(mh.position.x - r, mh.position.y);
+      ctx.lineTo(mh.position.x + r, mh.position.y);
+      ctx.moveTo(mh.position.x, mh.position.y - r);
+      ctx.lineTo(mh.position.x, mh.position.y + r);
+      ctx.stroke();
     }
 
     // Copper zones

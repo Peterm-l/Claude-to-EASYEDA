@@ -148,7 +148,26 @@ export function exportPCBJSON(project: Project): object {
   const outlinePoints = project.pcb.boardOutline.points
     .map(p => `${mmToEE(p.x)} ${mmToEE(p.y)}`)
     .join(' ');
-  shapes.push(`TRACK~1~10~${''/*no net*/}~${outlinePoints}~${eeId()}`);
+  shapes.push(`TRACK~1~10~${''/*no net*/}~${outlinePoints} ${mmToEE(project.pcb.boardOutline.points[0].x)} ${mmToEE(project.pcb.boardOutline.points[0].y)}~${eeId()}`);
+
+  // Mounting holes
+  for (const mh of project.pcb.boardOutline.mountingHoles) {
+    const cx = mmToEE(mh.position.x);
+    const cy = mmToEE(mh.position.y);
+    const padD = mmToEE(mh.padDiameter);
+    const holeR = mmToEE(mh.diameter / 2);
+    if (mh.plated) {
+      shapes.push(`PAD~ELLIPSE~${cx}~${cy}~${padD}~${padD}~11~~M~${holeR}~${cx} ${cy}~0~${eeId()}~0~~Y`);
+    } else {
+      shapes.push(`HOLE~${cx}~${cy}~${holeR * 2}~${eeId()}`);
+    }
+  }
+
+  // Keep-out zones
+  for (const zone of project.pcb.boardOutline.keepOutZones) {
+    const pts = zone.map(p => `${mmToEE(p.x)} ${mmToEE(p.y)}`).join(' ');
+    shapes.push(`SOLIDREGION~cutout~10~~${pts}~${eeId()}`);
+  }
 
   // Components (footprints)
   for (const comp of project.pcb.components) {
