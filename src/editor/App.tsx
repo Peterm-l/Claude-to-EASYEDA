@@ -2,8 +2,10 @@ import React, { useState, useCallback, useRef } from 'react';
 import { SchematicCanvas } from './components/SchematicCanvas';
 import { PCBCanvas } from './components/PCBCanvas';
 import { PartsPanel } from './components/PartsPanel';
+import { ChatPanel } from './components/ChatPanel';
 import { Toolbar } from './components/Toolbar';
 import { useProject } from './hooks/useProject';
+import { useToolExecution } from './hooks/useToolExecution';
 import type { JLCPCBPart, Point } from '../core/types';
 import { runDRC, type DRCViolation } from '../core/design-rules';
 
@@ -18,8 +20,12 @@ export function App() {
 
   const [drcViolations, setDrcViolations] = useState<DRCViolation[]>([]);
   const [showDRC, setShowDRC] = useState(false);
+  const [showChat, setShowChat] = useState(true);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('anthropic_api_key') ?? '');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [nextRef, setNextRef] = useState<Record<string, number>>({});
+
+  const executeTool = useToolExecution({ project, updateProject });
 
   const getNextRef = useCallback((prefix: string): string => {
     const num = (nextRef[prefix] ?? 0) + 1;
@@ -28,7 +34,6 @@ export function App() {
   }, [nextRef]);
 
   const handlePlacePart = useCallback((part: JLCPCBPart, position: Point) => {
-    // Determine reference prefix from category/description
     let prefix = 'U';
     const desc = (part.description + ' ' + part.category).toLowerCase();
     if (desc.includes('resistor') || desc.includes('resistance')) prefix = 'R';
@@ -82,6 +87,11 @@ export function App() {
     addTrack(points, netId, editorState.activeLayer);
   }, [addTrack, editorState.activeLayer]);
 
+  const handleApiKeyChange = useCallback((key: string) => {
+    setApiKey(key);
+    localStorage.setItem('anthropic_api_key', key);
+  }, []);
+
   return (
     <div style={styles.container}>
       <Toolbar
@@ -125,17 +135,24 @@ export function App() {
           )}
         </div>
 
-        {/* DRC / Info Panel */}
+        {/* Chat Panel */}
+        {showChat && (
+          <div style={styles.chatPanel}>
+            <ChatPanel
+              project={project}
+              onToolCall={executeTool}
+              apiKey={apiKey}
+              onApiKeyChange={handleApiKeyChange}
+            />
+          </div>
+        )}
+
+        {/* DRC Panel */}
         {showDRC && (
           <div style={styles.drcPanel}>
             <div style={styles.drcHeader}>
               <h4 style={styles.drcTitle}>DRC Results</h4>
-              <button
-                style={styles.drcClose}
-                onClick={() => setShowDRC(false)}
-              >
-                ×
-              </button>
+              <button style={styles.drcClose} onClick={() => setShowDRC(false)}>x</button>
             </div>
             {drcViolations.length === 0 ? (
               <div style={styles.drcOk}>No violations found!</div>
@@ -159,6 +176,15 @@ export function App() {
         )}
       </div>
 
+      {/* Toggle chat button */}
+      <button
+        style={styles.chatToggle}
+        onClick={() => setShowChat(!showChat)}
+        title={showChat ? 'Hide Claude chat' : 'Show Claude chat'}
+      >
+        {showChat ? 'Hide Chat' : 'Claude AI'}
+      </button>
+
       <input
         ref={fileInputRef}
         type="file"
@@ -178,6 +204,7 @@ const styles: Record<string, React.CSSProperties> = {
     height: '100vh',
     background: '#0a0a1a',
     color: '#ccccee',
+    position: 'relative',
   },
   main: {
     display: 'flex',
@@ -185,9 +212,8 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
   },
   sidePanel: {
-    width: 320,
-    minWidth: 280,
-    maxWidth: 400,
+    width: 300,
+    minWidth: 260,
     borderRight: '1px solid #303060',
     overflow: 'hidden',
   },
@@ -196,8 +222,14 @@ const styles: Record<string, React.CSSProperties> = {
     position: 'relative',
     overflow: 'hidden',
   },
+  chatPanel: {
+    width: 380,
+    minWidth: 320,
+    borderLeft: '1px solid #303060',
+    overflow: 'hidden',
+  },
   drcPanel: {
-    width: 300,
+    width: 280,
     borderLeft: '1px solid #303060',
     background: '#1a1a2e',
     overflow: 'auto',
@@ -209,48 +241,33 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px 12px',
     borderBottom: '1px solid #303060',
   },
-  drcTitle: {
-    margin: 0,
-    fontSize: 14,
-    color: '#66aaff',
-  },
+  drcTitle: { margin: 0, fontSize: 14, color: '#66aaff' },
   drcClose: {
-    background: 'none',
-    border: 'none',
-    color: '#888',
-    fontSize: 18,
-    cursor: 'pointer',
+    background: 'none', border: 'none', color: '#888', fontSize: 18, cursor: 'pointer',
   },
-  drcOk: {
-    padding: 20,
-    textAlign: 'center',
-    color: '#66cc66',
-    fontSize: 14,
-  },
-  drcList: {
-    padding: 8,
-  },
+  drcOk: { padding: 20, textAlign: 'center', color: '#66cc66', fontSize: 14 },
+  drcList: { padding: 8 },
   drcItem: {
-    padding: '8px',
-    marginBottom: 4,
-    background: '#252545',
-    borderRadius: 3,
-    borderLeft: '3px solid',
+    padding: '8px', marginBottom: 4, background: '#252545', borderRadius: 3, borderLeft: '3px solid',
   },
   drcType: {
-    fontSize: 11,
+    fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#aaa', marginBottom: 2,
+  },
+  drcMsg: { fontSize: 12, color: '#ddd', marginBottom: 2 },
+  drcLoc: { fontSize: 10, color: '#666' },
+  chatToggle: {
+    position: 'absolute',
+    bottom: 36,
+    right: 12,
+    padding: '8px 16px',
+    background: '#6644aa',
+    border: 'none',
+    borderRadius: 20,
+    color: '#fff',
+    cursor: 'pointer',
     fontWeight: 'bold',
-    textTransform: 'uppercase',
-    color: '#aaa',
-    marginBottom: 2,
-  },
-  drcMsg: {
     fontSize: 12,
-    color: '#ddd',
-    marginBottom: 2,
-  },
-  drcLoc: {
-    fontSize: 10,
-    color: '#666',
+    zIndex: 100,
+    boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
   },
 };

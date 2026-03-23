@@ -1,4 +1,4 @@
-import type { JLCPCBPart, Footprint, Pin, Pad, PadShape } from '../core/types';
+import type { JLCPCBPart, Footprint, Pin, Pad, PadShape, PinElectricType } from '../core/types';
 
 const JLCSEARCH_BASE = 'https://jlcsearch.tscircuit.com';
 
@@ -107,7 +107,7 @@ export async function searchCapacitors(options: {
 }
 
 function mapToPart(c: JLCSearchComponent): JLCPCBPart {
-  return {
+  const part: JLCPCBPart = {
     lcsc: `C${c.lcsc}`,
     mfr: c.mfr ?? '',
     manufacturer: c.manufacturer ?? '',
@@ -121,7 +121,149 @@ function mapToPart(c: JLCSearchComponent): JLCPCBPart {
     isPreferred: c.preferred ?? false,
     datasheet: c.datasheet ?? '',
     footprint: generateFootprintFromPackage(c.package),
-    pins: [],
+    pins: generatePinsFromPart(c),
+  };
+  return part;
+}
+
+// Generate pin data based on package type and description
+function generatePinsFromPart(c: JLCSearchComponent): Pin[] {
+  const pkg = (c.package ?? '').toUpperCase();
+  const desc = (c.description ?? '').toLowerCase();
+  const mfr = (c.mfr ?? '').toUpperCase();
+
+  // 2-pin passives (resistors, capacitors, inductors)
+  if (pkg.match(/^0[24680]/) || desc.includes('resistor') || desc.includes('capacitor') ||
+      desc.includes('inductor') || desc.includes('fuse')) {
+    return [
+      makePin('1', '1', 'passive', { x: -60, y: 0 }, 0),
+      makePin('2', '2', 'passive', { x: 60, y: 0 }, 180),
+    ];
+  }
+
+  // Diodes / LEDs
+  if (desc.includes('diode') || desc.includes(' led ') || desc.includes('rectifier') ||
+      desc.includes('schottky') || desc.includes('zener')) {
+    return [
+      makePin('1', 'A', 'passive', { x: -60, y: 0 }, 0),
+      makePin('2', 'K', 'passive', { x: 60, y: 0 }, 180),
+    ];
+  }
+
+  // SOT-23 3-pin transistors
+  if ((pkg.includes('SOT-23') || pkg.includes('SOT23')) && !pkg.match(/[56]/)) {
+    if (desc.includes('mosfet') || desc.includes('mos ')) {
+      return [
+        makePin('1', 'G', 'input', { x: -80, y: 25 }, 0),
+        makePin('2', 'S', 'passive', { x: -80, y: -25 }, 0),
+        makePin('3', 'D', 'passive', { x: 80, y: 0 }, 180),
+      ];
+    }
+    return [
+      makePin('1', 'B', 'input', { x: -80, y: 25 }, 0),
+      makePin('2', 'E', 'passive', { x: -80, y: -25 }, 0),
+      makePin('3', 'C', 'passive', { x: 80, y: 0 }, 180),
+    ];
+  }
+
+  // SOT-23-5 / SOT-23-6 (LDOs, etc.)
+  if (pkg.match(/SOT-?23-?5/i)) {
+    if (desc.includes('regulator') || desc.includes('ldo')) {
+      return [
+        makePin('1', 'IN', 'power_in', { x: -80, y: -25 }, 0),
+        makePin('2', 'GND', 'power_in', { x: -80, y: 25 }, 0),
+        makePin('3', 'EN', 'input', { x: -80, y: 75 }, 0),
+        makePin('4', 'NC/BP', 'passive', { x: 80, y: 25 }, 180),
+        makePin('5', 'OUT', 'output', { x: 80, y: -25 }, 180),
+      ];
+    }
+  }
+
+  // SOIC-8 common ICs
+  if (pkg.match(/SO-?8|SOIC-?8|SOP-?8/i)) {
+    if (desc.includes('555') || mfr.includes('555')) {
+      return [
+        makePin('1', 'GND', 'power_in', { x: -80, y: -75 }, 0),
+        makePin('2', 'TRIG', 'input', { x: -80, y: -25 }, 0),
+        makePin('3', 'OUT', 'output', { x: -80, y: 25 }, 0),
+        makePin('4', 'RESET', 'input', { x: -80, y: 75 }, 0),
+        makePin('5', 'CTRL', 'input', { x: 80, y: 75 }, 180),
+        makePin('6', 'THR', 'input', { x: 80, y: 25 }, 180),
+        makePin('7', 'DIS', 'output', { x: 80, y: -25 }, 180),
+        makePin('8', 'VCC', 'power_in', { x: 80, y: -75 }, 180),
+      ];
+    }
+    if (desc.includes('op-amp') || desc.includes('operational amplifier')) {
+      return [
+        makePin('1', 'OUT A', 'output', { x: -80, y: -75 }, 0),
+        makePin('2', 'IN- A', 'input', { x: -80, y: -25 }, 0),
+        makePin('3', 'IN+ A', 'input', { x: -80, y: 25 }, 0),
+        makePin('4', 'V-', 'power_in', { x: -80, y: 75 }, 0),
+        makePin('5', 'IN+ B', 'input', { x: 80, y: 75 }, 180),
+        makePin('6', 'IN- B', 'input', { x: 80, y: 25 }, 180),
+        makePin('7', 'OUT B', 'output', { x: 80, y: -25 }, 180),
+        makePin('8', 'V+', 'power_in', { x: 80, y: -75 }, 180),
+      ];
+    }
+    if (desc.includes('uart') || desc.includes('rs232') || desc.includes('ch340') || desc.includes('cp210')) {
+      return generateNumberedPins(8);
+    }
+  }
+
+  // SOT-223 / SOT-89 voltage regulators
+  if (pkg.match(/SOT-?223|SOT-?89/i)) {
+    if (desc.includes('regulator') || desc.includes('ldo') || mfr.match(/AMS1117|LM1117|AP2112/i)) {
+      return [
+        makePin('1', 'GND', 'power_in', { x: -80, y: 25 }, 0),
+        makePin('2', 'OUT', 'output', { x: 0, y: -50 }, 90),
+        makePin('3', 'IN', 'power_in', { x: 80, y: 25 }, 180),
+        makePin('4', 'OUT', 'output', { x: 0, y: 50 }, 270),
+      ];
+    }
+  }
+
+  // Generic: count pins from package name
+  const pinMatch = pkg.match(/(\d+)/);
+  if (pinMatch) {
+    const count = parseInt(pinMatch[1]);
+    if (count >= 2 && count <= 200) {
+      return generateNumberedPins(count);
+    }
+  }
+
+  return generateNumberedPins(2);
+}
+
+function generateNumberedPins(count: number): Pin[] {
+  const pins: Pin[] = [];
+  const halfCount = Math.ceil(count / 2);
+  const spacing = 50;
+
+  for (let i = 0; i < halfCount; i++) {
+    pins.push(makePin(
+      String(i + 1), String(i + 1), 'passive',
+      { x: -80, y: -((halfCount - 1) * spacing) / 2 + i * spacing }, 0
+    ));
+  }
+  for (let i = 0; i < count - halfCount; i++) {
+    const pinNum = count - i;
+    pins.push(makePin(
+      String(pinNum), String(pinNum), 'passive',
+      { x: 80, y: -((count - halfCount - 1) * spacing) / 2 + i * spacing }, 180
+    ));
+  }
+  return pins;
+}
+
+function makePin(number: string, name: string, electricType: PinElectricType, position: { x: number; y: number }, orientation: number): Pin {
+  return {
+    id: `pin_${number}`,
+    number,
+    name,
+    electricType,
+    position,
+    orientation,
+    length: 30,
   };
 }
 
