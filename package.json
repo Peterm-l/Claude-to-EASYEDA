@@ -1,0 +1,27 @@
+{
+  "name": "claude-to-easyeda",
+  "version": "1.0.0",
+  "description": "AI-powered PCB design tool with JLCPCB parts integration and EasyEDA export",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "mcp": "tsx src/mcp/server.ts",
+    "cli": "tsx src/cli/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0"
+  }
+}
